@@ -1,0 +1,121 @@
+\documentclass[12pt]{article}
+\usepackage{fullpage}
+\usepackage{amsmath,amssymb}
+
+\title{Implementation of the Anisotropic Structure Function based LES model in Nalu}
+\author{J. Melvin and M. Henry de Frahan}
+
+
+\begin{document}
+\maketitle
+
+\section{Summary of Required Terms and Equations}
+
+\noindent New stored tensors:
+\begin{enumerate}
+\item $\mathcal{M}_{ij}$ (see Sec.~\ref{sec:resten})
+\item $\tilde{\mathcal{M}_{ij}}$ (see Sec.~\ref{sec:strfxn})
+\item $\mathcal{Q}_{ij}$ (see Eq. 1 in [1])
+\item $\nu_{ij}^t$ (replaces the scalar eddy viscosity, see Eq. 6 in [1]) 
+\end{enumerate}
+
+\noindent New stored scalars: 
+\begin{enumerate}
+\item $r_k$ (see Eq. 4 in [1])
+\end{enumerate}
+
+\noindent New equations to evolve:
+\begin{enumerate}
+\item $k, \epsilon$/$\omega$ (can use the SST equations already in Nalu, but needs some minor adaptations, see Eq. 8 [1]) 
+\item $\alpha$ (See Eq. 12 in [1])
+\end{enumerate}
+
+\section{Overall Implementation Plan:}
+\begin{enumerate}
+\item Create an AdaptivityParameterEquationSystem class to manage and solve the $\alpha$ equation (Use other *EquationSystem classes, such as the TKE equation system as a template).
+\item Create an AnisoStructureFunctionEquationSystem class to manage the aSF model equations (utilizing the TKE and SDR equation systems and the newly created $\alpha$ equation system as done in the SST equation system).  
+\item Add the infrastructure for the $r_k$ scalar field and $\mathcal{Q}_{ij}, \nu_{ij}^t, \mathcal{M}_{ij}$ and $\tilde{\mathcal{M}}_{ij}$ tensor fields where necessary in the header files for Nalu.  
+\item Create a ResolutionTensorAlgorithm class for calculating  $\mathcal{M}_{ij}$ and $\tilde{\mathcal{M}}_{ij}$.  These functions should be called as part of the init block of the assemble\textunderscore and\textunderscore solve function in the AnisoStructureFunctionEquationSystem class.
+\item Create an AnisoSFAlgorithm class for the purposes of calculating $\mathcal{Q}_{ij}$ (Use other *Algorithm classes as a template).
+\item Create a ResolutionAdequacyParameterAlgorithm class for the calculation of the $r_k$ field.
+\item Create an additional TKESuppAlg class to allow for the modification of the production term in the TKE equation to include $\alpha$.
+\item Create an AssembleScalarElemAdvSolverAlgorithm class to just assemble advection, since $\alpha$ equation doesn't have diffusion.
+\item Create an $\alpha$ source Supp Alg class to handle the RHS of the $\alpha$ equation.
+\item Setup the infrastructure to solve the $\alpha$, TKE and SDR equations in the aSF Equation System class.
+\item Create the Supplementary Algorithm files (i.e. MomentumTensorEddyVisc*SuppAlg) for calculating and adding the tensor eddy viscosity based subgrid stress to the momentum solver. $\alpha$ modifications to the subgrid stress tensor should be included in this Supplementary Algorithm.
+\item Add aSF as an input option and to I/O files
+\end{enumerate}
+
+
+\section{Additional Details on Individual Algorithm Parts}
+
+
+\subsection{Resolution Tensor}
+\label{sec:resten}
+This is a new tensor quantity $\mathcal{M}_{ij}$.  Ideally it is initially calculated based on the grid (or does not have to be tied to the grid, if the grid resolution is more refined than necessary) and stored for each cell.  It needs to be accessible by the LES unit when calculating the new viscosity tensor.
+
+To calculate this, a Gram-Schmidt orthogonalization of the three longest face to face (for hex) or node to node (for others) vectors of the cell is used.  Note: Since Nalu is finite element based this may come cheaper (without the G-S orthogonalization needed).  Based off of the mapping from master element to global finite elements.  Is this information in Nalu...is this what comes out of meSCS $\rightarrow$ determinant?  If so, this may be simply $\mathcal{J}^T\mathcal{J}$ where $\mathcal{J}$ is the mapping Jacobian from master to global. \\
+
+\noindent Implementation:
+
+Most likely this function should be called during the isInit\textunderscore \ block of the solve\textunderscore and\textunderscore update for the new AnisoStructureFunctionEquationSystem class, with a possible option outside of the init block to account for if mesh\textunderscore motion is active.  Note: We have to decide if this will need to be recalculated due to mesh motion.  Also, it may be necessary to recalculate in a post\textunderscore adapt\textunderscore work() function as well. We need to better understand what is going on in adaptivity to assess this.  We should be able to use the way DES is implemented in the ShearStressTransportEquationSystem as a guide. \\
+
+\noindent Unit Test(s): \\
+- Simple 2x2x2 Hex mesh with varying resolution \\
+- Simple 2x2x2 Tet mesh with varying resolution
+
+
+
+\subsection{Structure Function}
+\label{sec:strfxn}
+This requires two new tensor quantities, $\tilde{\mathcal{M}_{ij}}$ and $\mathcal{Q}_{ij}$.  $\mathcal{Q}_{ij}$ needs to be calculated dynamically as it relies on the current state of the system through velocity gradients.  This calculation is Eq. 1 in [1]. $\tilde{\mathcal{M}}_{ij}$ is only a function of the eigenvalues of $\mathcal{M}_{ij}$, through Eq. 3 (using Eq. 2 and the Appendix as intermediate steps) in [1], and the alignment of the eigenvectors and thus can be calculated only as often as $\mathcal{M}_{ij}$. \\
+
+\noindent Implementation described in Sec. 2. \\
+
+\noindent Unit Test(s): \\
+
+
+
+\subsection{Resolution Adequacy}
+This requires a new scalar field $r_k$ which is dynamically calculated.  This assumes that we have an evolution equation for $k$, using a $k$-based LES model which can provide us with a measure of the modeled turbulent kinetic energy $k_m$.  From the largest eigenvalue of $\mathcal{Q}$ we can calculate $k_{max}^{sf}$ and then using Eq. 4 in [1] we can calculate $r_k$. \\
+
+\noindent Implementation described in Sec. 2. \\
+
+\noindent Unit Test(s): \\
+
+
+
+\subsection{Anisotropic Model Stress}
+This defines a tensor eddy viscosity $\nu_{ij}^t$, defined below, which will need to replace the current implementation using a scalar eddy viscosity.  The below form is preferable to that described in the attached [1] for building upon the SST model already in Nalu.  This is calculated as described in Eq~\ref{eq:visctens} with inclusion in the momentum equation through the subgrid stress described in Eq. 5 in [1]. $\nu_{k-\omega}^t$ is the eddy viscosity from the Menter SST implementation used in Nalu.  It seems to be that a scalar eddy viscosity is assumed in the momentum solve (AssembleMomentumElemSolverAlgorithm.C), where this is the effective viscosity if the flow is turbulent (with a turbulent model viscosity).  Things like the NSO seem to be treated as separate source terms.  Therefore this may be the easiest way to proceed (i.e. use a separate source term algorithm) so that code in multiple locations doesn't need to be changed.
+\begin{equation}
+\label{eq:visctens}
+\begin{aligned}
+\nu_{ij}^t &= \nu_{k-\omega}^t a_{ij} \\
+a_{ij} &= \frac{\mathcal{Q}_{ij}^*}{\mathrm{max} (\lambda_i^{\mathcal{Q}^*})} \\
+\mathcal{Q}_{ij}^* &= \mathcal{Q}(M)
+\end{aligned}
+\end{equation}
+
+\noindent Implementation:
+\begin{enumerate}
+\item Set the turbulent viscosity to 0, so that the effective viscosity takes on only the physical value when using the anisotropic models.
+\item Add the tensor viscosity as a separate source term to be handled in a separate SuppAlg file added invoked through adding it to the option list in LowMachEquationSystem.C::register\textunderscore interior\textunderscore algorithm.
+\end{enumerate}
+
+\noindent Unit Test(s): \\
+- Use an isotropic tensor eddy viscosity and compare to a solution from a scalar eddy viscosity.
+
+
+
+\subsection{Model Adaptivity}
+This produces the transport equation for $\alpha$, the adaptivity parameter.  This is Eq. 12 in [1].  Since we have access to an $\omega$ equation already in Nalu, we can directly get the necessary timescale $T$ and can back out the desired lengthscale $L$ from that. \\
+
+\noindent Implementation described in Sec. 2. \\
+
+\noindent Unit Test(s): \\
+- Convecting isotropic turbulence moved through a periodic grid with varying resolutions.
+
+\section*{References}
+\noindent [1] S. Haering and R. D. Moser, Resolution Adapting LES. \\
+
+\end{document}
